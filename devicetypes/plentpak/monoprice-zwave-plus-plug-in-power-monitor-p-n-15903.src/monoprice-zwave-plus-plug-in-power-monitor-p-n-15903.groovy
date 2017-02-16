@@ -65,31 +65,30 @@ metadata {
 		main(["switch","power","energy"])
 		details(["switch","energy","va","power","potential","current","factor","refresh","reset"])
 	}
+
+	preferences {
+        input("secondsinterval", "number", title:"Auto Report Timing (60-255s (Default: 60s))"); //, required:false, displayDuringSetup: true)
+        input("wattsinterval", "number", title:"Report when Wattage Changes (5-3600W (Default: 50W))"); //, required:false, displayDuringSetup: true)
+    }
 }
 
 def updated() {
-	try {
-		if (!state.MSR) {
-			response(zwave.manufacturerSpecificV2.manufacturerSpecificGet().format())
-		}
-        else
-			response(refresh())
-	} catch (e) { log.debug("exception: $e") }
+	configure()
 }
 
 def parse(description) {
 	def result = null
 	if (description.startsWith("Err 106")) {
-    	log.debug("Security Encapsulation Error")
+    	log.debug("ERROR: Security Encapsulation Error")
 		state.sec = 0
 		result = createEvent(descriptionText: description, isStateChange: true)
 	} else if (description != "updated") {
 		def cmd = zwave.parse(description)
 		if (cmd) {
 			result = zwaveEvent(cmd)
-			log.debug("parsed: $result")
+			// log.debug("INFO: Parsed: $result")
 		} else {
-			log.debug("Couldn't zwave.parse '$description'")
+			log.debug("ERROR: Couldn't zwave.parse '$description'")
 		}
 	}
 	result
@@ -150,27 +149,26 @@ def refresh() {
 		zwave.meterV2.meterGet(scale: 3),
 		zwave.meterV2.meterGet(scale: 4),
 		zwave.meterV2.meterGet(scale: 5),
-		zwave.meterV2.meterGet(scale: 6)
-        ])
+		zwave.meterV2.meterGet(scale: 6),
+    ])
 }
 
 private command(physicalgraph.zwave.Command cmd) {
 	if (state.sec != 0) {
-    	log.debug("secure command $cmd")
+    	// log.debug("INFO: Secure Command: $cmd")
 		zwave.securityV1.securityMessageEncapsulation().encapsulate(cmd).format()
 	} else {
-    	log.debug("insecure command $cmd")
+    	log.debug("INFO: Insecure Command: $cmd")
         cmd.format()
 	}
 }
 
 private commands(commands, delay=200) {
-	log.debug("commands: $commands")
 	delayBetween(commands.collect{ command(it) }, delay)
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.meterv2.MeterReport cmd) {
-	if(cmd.reserved02) {
+	if (cmd.reserved02) {
     	if (cmd.scale == 0) {
             createEvent(name: "potential", value: cmd.scaledMeterValue, unit: "V")
         } else if (cmd.scale == 1) {
@@ -189,32 +187,26 @@ def zwaveEvent(physicalgraph.zwave.commands.meterv2.MeterReport cmd) {
     }
 }
 
-def zwaveEvent(physicalgraph.zwave.commands.manufacturerspecificv2.ManufacturerSpecificReport cmd) {
-	def result = []
-
-	def msr = String.format("%04X-%04X-%04X", cmd.manufacturerId, cmd.productTypeId, cmd.productId)
-	log.debug "msr: $msr"
-	updateDataValue("MSR", msr)
-
-	// retypeBasedOnMSR()
-
-	result << createEvent(descriptionText: "$device.displayName MSR: $msr", isStateChange: false)
-
-//	if (msr.startsWith("0109") && !state.monoconfig) {  // Monoprice meter
-    	log.debug "monoprice meter"
-		state.monoconfig = 1
-		result << response(delayBetween([
-			zwave.configurationV1.configurationSet(parameterNumber: 1, size: 1, scaledConfigurationValue: 60).format(), // Auto Report Timing (60-255, 60 default)
-			zwave.configurationV1.configurationSet(parameterNumber: 2, size: 2, scaledConfigurationValue: 5).format(), // Report when Wattage Changes (5-3600W (default 50))
-
-			zwave.configurationV1.configurationGet(parameterNumber: 1).format(), // Auto Report Timing (60-255, 60 default)
-			zwave.configurationV1.configurationGet(parameterNumber: 2).format() // Report when Wattage Changes (5-3600W (default 50))
-            ]))
-	result
+def configure() {
+	commands([
+        zwave.configurationV1.configurationSet(parameterNumber: 1, size: 1, scaledConfigurationValue: settings.secondsinterval ? settings.secondsinterval as Byte : 60), // Auto Report Timing (60-255, 60 default)
+        zwave.configurationV1.configurationSet(parameterNumber: 2, size: 2, scaledConfigurationValue: settings.wattsinterval ? settings.wattsinterval as Short : 50), // Report when Wattage Changes (5-3600W (default 50))
+        zwave.configurationV1.configurationGet(parameterNumber: 1), // Auto Report Timing (60-255, 60 default)
+        zwave.configurationV1.configurationGet(parameterNumber: 2) // Report when Wattage Changes (5-3600W (default 50))
+    ])
 }
 
-def configure() {
-	command(zwave.manufacturerSpecificV2.manufacturerSpecificGet())
+def zwaveEvent(physicalgraph.zwave.commands.configurationv1.ConfigurationReport cmd) {
+	if(cmd.parameterNumber == 1) {
+    	if(cmd.configurationValue[0] != (settings.secondsinterval ? settings.secondsinterval : 60)) {
+        	log.debug("WARNIING: Desired seconds interval ${settings.secondsinterval} not matching response ${cmd.configurationValue[0]}!")
+        }
+    } else if(cmd.parameterNumber == 2) {
+    	int watts = cmd.configurationValue[0] * 256 + cmd.configurationValue[1]
+    	if(watts != (settings.wattsinterval ? settings.wattsinterval : 50)) {
+        	log.debug("WARNING: Desired watts interval ${settings.wattsinterval} not matching response ${watts}!")
+        }
+    }
 }
 
 def reset() {
